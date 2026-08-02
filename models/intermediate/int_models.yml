@@ -1,0 +1,56 @@
+models:
+
+  - name: int_order_items_summary
+
+    columns:
+
+      - name: order_id
+
+        tests:
+
+          - unique
+
+          - not_null
+
+  - name: int_order_payments
+
+    columns:
+
+      - name: order_id
+
+        tests:
+
+          - unique
+
+          - not_null
+
+  - name: int_order_reviews
+
+    columns:
+
+      - name: order_review_id
+
+        tests:
+
+          - unique
+
+          - not_null
+
+  - name: int_order_items
+
+    columns:
+
+      - name: order_id
+
+        tests:
+
+          - not_null
+
+      - name: order_item_id
+
+        tests:
+
+          - not_null
+
+    # Composite uniqueness (order_id + order_item_id) deferred to Day 8 --
+    # needs dbt_utils.unique_combination_of_columns, not installed yet.
