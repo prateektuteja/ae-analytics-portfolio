@@ -1,0 +1,45 @@
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  dbt-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create dbt profile
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml << 'EOF'
+          ae_analytics_portfolio:
+            target: ci
+            outputs:
+              ci:
+                type: duckdb
+                path: dev.duckdb
+                threads: 4
+          EOF
+
+      - name: Install dbt packages
+        run: dbt deps
+
+      - name: Seed raw data
+        run: dbt seed
+
+      - name: Build and test all models
+        run: dbt build
