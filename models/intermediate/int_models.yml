@@ -1,33 +1,75 @@
+version: 2
+
 models:
-- name: int_order_items_summary
-  columns:
-  - name: order_id
+  - name: int_order_items_summary
+    description: "Aggregates stg_order_items to order grain (one row per order_id) — item_count, total_item_value, total_freight_value. Feeds fct_orders via a left join on order_id."
+    columns:
+      - name: order_id
+        description: "Primary key at order grain. This model exists specifically to collapse stg_order_items' (order_id, order_item_id) grain down to one row per order."
+        tests: [unique, not_null]
+      - name: item_count
+        description: "count(*) of line items on the order — a row count, not a distinct product count."
+      - name: total_item_value
+        description: "sum(price) across all line items on the order, rounded to 2 decimal places to avoid float accumulation error (e.g. 879.4399999999999 vs. 879.44)."
+      - name: total_freight_value
+        description: "sum(freight_value) across all line items on the order, rounded to 2 decimal places."
+
+  - name: int_order_payments
+    description: "Aggregates stg_payments to order grain. The most complex model in the intermediate layer — payment_installments_count required row-level profiling of real multi-payment orders to get right: a naive sum(payment_installments) across all rows produces garbage, because voucher rows carry payment_installments = 1 as a structural artifact, not a real installment count. Resolved by scoping the sum to payment_type = 'credit_card' rows only."
+    columns:
+      - name: order_id
+        description: "Primary key at order grain."
+        tests: [unique, not_null]
+      - name: total_paid_amount
+        description: "sum(payment_value) across all payment rows on the order, regardless of payment_type, rounded to 2 decimal places."
+      - name: payment_installments_count
+        description: "sum(payment_installments) scoped to payment_type = 'credit_card' rows only. Summing across all payment types double-counts — voucher rows carry payment_installments = 1 as a structural artifact, not a real value. Also not max(), since multi-credit-card orders exist in this dataset (2 real cards, e.g. 10 + 1 installments)."
+      - name: credit_card_count
+        description: "count(*) of payment rows on the order where payment_type = 'credit_card'. Distinguishes '1 card, N installments' from 'N installments split across multiple cards.'"
+      - name: distinct_payment_types_count
+        description: "count(distinct payment_type) across the order's payment rows — e.g. an order paid partly by voucher and partly by credit_card shows 2."
+      - name: payment_installment_opted
+        description: "Boolean flag, true when payment_installments_count > 1."
+
+  - name: int_order_reviews
+    description: "Reviews kept at their true native grain (order_id, review_id) rather than deduped to one row per order — deduping would silently discard real bundled-review data with no way to recover it later. order_review_id is a deterministic surrogate key (no salt needed — surrogate keys must be reproducible, not secret). Not yet wired into a mart; 'one review score per order' aggregation is deferred to whichever future mart/join needs it."
+    columns:
+      - name: order_review_id
+        description: "Deterministic surrogate key: md5(order_id || '~' || review_id). True primary key of this model, since neither order_id nor review_id alone is unique at this grain."
+        tests: [unique, not_null]
+      - name: order_id
+        description: "Half of the model's native (order_id, review_id) grain. One order_id can have multiple review rows when Olist bundles a customer's orders into a single review request."
+      - name: review_id
+        description: "Half of the model's native (order_id, review_id) grain. Not unique alone — see stg_reviews for why."
+      - name: review_score
+        description: "Pass-through from stg_reviews. Customer star rating, 1-5 scale."
+      - name: review_created_at
+        description: "Pass-through from stg_reviews. Timestamp Olist sent the review request."
+      - name: review_answered_at
+        description: "Pass-through from stg_reviews. Timestamp the customer submitted their review response."
+
+  - name: int_order_items
+    description: "Thin pass-through of stg_order_items at its native (order_id, order_item_id) grain — exists so downstream consumers reference a stable int_ model rather than reaching back to staging directly. Only real transformation is rounding price/freight_value to 2 decimals."
     tests:
-    - unique
-    - not_null
-- name: int_order_payments
-  columns:
-  - name: order_id
-    tests:
-    - unique
-    - not_null
-- name: int_order_reviews
-  columns:
-  - name: order_review_id
-    tests:
-    - unique
-    - not_null
-- name: int_order_items
-  tests:
-  - dbt_utils.unique_combination_of_columns:
-      arguments:
-        combination_of_columns:
-        - order_id
-        - order_item_id
-  columns:
-  - name: order_id
-    tests:
-    - not_null
-  - name: order_item_id
-    tests:
-    - not_null
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_item_id
+    columns:
+      - name: order_id
+        description: "Part of the composite key (order_id, order_item_id), enforced via the model-level dbt_utils.unique_combination_of_columns test."
+        tests: [not_null]
+      - name: order_item_id
+        description: "Second half of the composite key."
+        tests: [not_null]
+      - name: product_id
+        description: "FK to dim_products. Pass-through from stg_order_items."
+      - name: seller_id
+        description: "FK to dim_sellers. Pass-through from stg_order_items. An order's line items can span multiple sellers, which is why fct_orders doesn't carry seller_id directly."
+      - name: shipping_limit_at
+        description: "Pass-through from stg_order_items. Seller's deadline to hand the item off to the carrier."
+      - name: price
+        description: "Pass-through from stg_order_items, rounded to 2 decimal places to avoid float accumulation error."
+      - name: freight_value
+        description: "Pass-through from stg_order_items, rounded to 2 decimal places."

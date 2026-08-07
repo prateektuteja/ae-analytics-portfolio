@@ -1,67 +1,140 @@
+version: 2
+
 models:
-- name: fct_orders
-  columns:
-  - name: customer_id
+  - name: fct_orders
+    description: "Order-grain fact table (materialized as a table). Left-joins stg_orders to int_order_items_summary and int_order_payments on order_id. Scoped to customer_id as its only dimension FK — an order's line items can span multiple sellers/products, so seller_id/product_id live on fct_order_items instead (a standard galaxy-schema setup, two facts sharing conformed dims). Conceptually designed as an accumulating snapshot (lifecycle milestone dates as columns), but stays a plain table rather than incremental — the Olist seed is a static one-time load with no incremental merge to demonstrate against."
+    columns:
+      - name: order_id
+        description: "Primary key. Grain-defining column of this fact table — one row per order."
+      - name: customer_id
+        description: "FK to dim_customers. The only dimension FK carried directly on fct_orders."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_id
+      - name: order_status
+        description: "Order lifecycle state. Accepted values pulled from the real distinct set via dbt show --inline rather than assumed: shipped, delivered, created, approved, unavailable, invoiced, processing, canceled."
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - shipped
+                  - delivered
+                  - created
+                  - approved
+                  - unavailable
+                  - invoiced
+                  - processing
+                  - canceled
+      - name: order_purchase_at
+        description: "Pass-through from stg_orders. Timestamp the order was placed."
+      - name: order_approved_at
+        description: "Pass-through from stg_orders. Nulls expected for orders that haven't reached payment approval."
+      - name: order_delivered_carrier_at
+        description: "Pass-through from stg_orders. Nulls expected for orders not yet shipped."
+      - name: order_delivered_customer_at
+        description: "Pass-through from stg_orders. Nulls expected for orders not yet delivered."
+      - name: order_estimated_delivery_at
+        description: "Pass-through from stg_orders. Always populated."
+      - name: item_count
+        description: "From int_order_items_summary. Count of line items on the order."
+      - name: total_item_value
+        description: "From int_order_items_summary. Sum of line-item prices, rounded to 2 decimals."
+      - name: total_freight_value
+        description: "From int_order_items_summary. Sum of line-item freight costs, rounded to 2 decimals."
+      - name: total_paid_amount
+        description: "From int_order_payments. Null for orders with no payment rows (e.g. cancelled before payment) — confirmed via a sample-row check during Day 6 validation, not just inferred from row counts."
+      - name: payment_installments_count
+        description: "From int_order_payments. Real installment count, correctly scoped to credit_card payment rows only — see int_order_payments for why a naive sum breaks."
+      - name: credit_card_count
+        description: "From int_order_payments. Number of credit_card payment rows on the order."
+      - name: payment_installment_opted
+        description: "From int_order_payments. True when payment_installments_count > 1."
+      - name: distinct_payment_types_count
+        description: "From int_order_payments. Count of distinct payment methods used on the order."
+
+  - name: fct_order_items
+    description: "Line-item grain fact table (grain: order_id + order_item_id) — near-direct pass-through of int_order_items. Exists alongside fct_orders as the second fact in a galaxy-schema design: since one order can span multiple sellers/products, this fact owns those FKs and the per-item measures instead."
     tests:
-    - relationships:
-        arguments:
-          to: ref('dim_customers')
-          field: customer_id
-  - name: order_status
-    tests:
-    - not_null
-    - accepted_values:
-        arguments:
-          values:
-          - shipped
-          - delivered
-          - created
-          - approved
-          - unavailable
-          - invoiced
-          - processing
-          - canceled
-- name: fct_order_items
-  tests:
-  - dbt_utils.unique_combination_of_columns:
-      arguments:
-        combination_of_columns:
-        - order_id
-        - order_item_id
-  columns:
-  - name: product_id
-    tests:
-    - relationships:
-        arguments:
-          to: ref('dim_products')
-          field: product_id
-  - name: seller_id
-    tests:
-    - relationships:
-        arguments:
-          to: ref('dim_sellers')
-          field: seller_id
-  - name: order_id
-    tests:
-    - relationships:
-        arguments:
-          to: ref('fct_orders')
-          field: order_id
-- name: dim_customers
-  columns:
-  - name: customer_id
-    tests:
-    - unique
-    - not_null
-- name: dim_sellers
-  columns:
-  - name: seller_id
-    tests:
-    - unique
-    - not_null
-- name: dim_products
-  columns:
-  - name: product_id
-    tests:
-    - unique
-    - not_null
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_item_id
+    columns:
+      - name: product_id
+        description: "FK to dim_products."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+      - name: seller_id
+        description: "FK to dim_sellers."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_id
+      - name: order_id
+        description: "FK to fct_orders. Also part of this model's own composite grain (order_id + order_item_id)."
+        tests:
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+      - name: order_item_id
+        description: "Second half of this model's composite grain, enforced via the model-level dbt_utils.unique_combination_of_columns test."
+      - name: price
+        description: "Line-item price, rounded to 2 decimals upstream in int_order_items."
+      - name: freight_value
+        description: "Line-item freight cost, rounded to 2 decimals upstream in int_order_items."
+
+  - name: dim_customers
+    description: "Customer dimension, pure pass-through of stg_customers — no intermediate step needed since the source is already at the right grain."
+    columns:
+      - name: customer_id
+        description: "Primary key, one row per order-scoped customer_id (see customer_unique_id for the real-world-person identifier)."
+        tests: [unique, not_null]
+      - name: customer_unique_id
+        description: "Olist's persistent identifier for the real-world customer across multiple orders — use this, not customer_id, to dedupe a customer across their order history."
+      - name: customer_city
+        description: "Pass-through from stg_customers. Profiled clean — no casing/whitespace normalization needed."
+      - name: customer_state
+        description: "Pass-through from stg_customers. Two-letter Brazilian state code."
+      - name: customer_zip_code_prefix
+        description: "Pass-through from stg_customers. First digits of postal code only (full zip not provided in this dataset)."
+
+  - name: dim_sellers
+    description: "Seller dimension, pure pass-through of stg_sellers — no intermediate step needed."
+    columns:
+      - name: seller_id
+        description: "Primary key."
+        tests: [unique, not_null]
+      - name: seller_city
+        description: "Pass-through from stg_sellers. Profiled clean — no casing/whitespace normalization needed."
+      - name: seller_state
+        description: "Pass-through from stg_sellers. Two-letter Brazilian state code."
+      - name: seller_zip_code_prefix
+        description: "Pass-through from stg_sellers. First digits of postal code only."
+
+  - name: dim_products
+    description: "Product dimension. Joins stg_products to stg_product_category_translation on product_category_name, using coalesce(english translation, original name) so untranslated/missing categories fall back to the Portuguese name rather than going null. Checked explicitly for join fan-out — no duplicate category names on the translation table, so this join doesn't inflate dim_products' row count."
+    columns:
+      - name: product_id
+        description: "Primary key."
+        tests: [unique, not_null]
+      - name: product_category_name
+        description: "English category name where a translation exists, coalesced back to the original Portuguese name otherwise."
+      - name: product_weight_g
+        description: "Pass-through from stg_products. Null for the 2 products missing physical dimensions."
+      - name: product_length_cm
+        description: "Pass-through from stg_products. Null for the 2 products missing physical dimensions."
+      - name: product_height_cm
+        description: "Pass-through from stg_products. Null for the 2 products missing physical dimensions."
+      - name: product_width_cm
+        description: "Pass-through from stg_products. Null for the 2 products missing physical dimensions."
+      - name: product_photos_qty
+        description: "Pass-through from stg_products. Null for the 610 products with incomplete listings."

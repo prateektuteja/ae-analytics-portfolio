@@ -1,130 +1,160 @@
 version: 2
+
 models:
-- name: stg_orders
-  description: "Confirmed order_id is a true unique key (no duplicates found via profiling). order_approved_at,\
-    \ order_delivered_carrier_date, and order_delivered_customer_date have expected nulls (160/1,783/2,965\
-    \ rows) \u2014 orders that haven't reached that lifecycle stage (pending/cancelled/undelivered), not\
-    \ a data defect."
-  columns:
-  - name: order_id
+  - name: stg_orders
+    description: "Confirmed order_id is a true unique key (no duplicates found via profiling). order_approved_at, order_delivered_carrier_date, and order_delivered_customer_date have expected nulls (160/1,783/2,965 rows) — orders that haven't reached that lifecycle stage (pending/cancelled/undelivered), not a data defect."
+    columns:
+      - name: order_id
+        description: "Primary key. Confirmed unique via profiling — no duplicate order_ids found in raw_orders."
+        tests: [unique, not_null]
+      - name: customer_id
+        description: "FK to dim_customers. One customer per order — Olist orders are always tied to a registered customer, no guest checkout."
+        tests: [not_null]
+      - name: order_status
+        description: "Order lifecycle state (e.g. delivered, shipped, canceled, invoiced, processing). Distinct values confirmed via dbt show --inline before adding the accepted_values test on fct_orders."
+        tests: [not_null]
+      - name: order_purchase_at
+        description: "Timestamp the customer placed the order. Always populated — start of the order lifecycle."
+      - name: order_approved_at
+        description: "Timestamp payment was approved. 160 nulls expected — orders that haven't reached this lifecycle stage (e.g. pending/cancelled before approval), not a data defect."
+      - name: order_delivered_carrier_at
+        description: "Timestamp the order was handed to the logistics carrier. 1,783 nulls expected — orders not yet shipped."
+      - name: order_delivered_customer_at
+        description: "Timestamp the order was delivered to the customer. 2,965 nulls expected — orders not yet delivered (in transit, cancelled, or undelivered)."
+      - name: order_estimated_delivery_at
+        description: "Estimated delivery date shown to the customer at purchase time. Always populated."
+
+  - name: stg_customers
+    description: "Confirmed customer_id is a true unique key. Profiled customer_city/customer_state for casing inconsistency — none found (clean)."
+    columns:
+      - name: customer_id
+        description: "Primary key. Confirmed unique via profiling."
+        tests: [unique, not_null]
+      - name: customer_city
+        description: "Customer's city, self-reported at checkout. Profiled for casing/whitespace inconsistency — none found, so no normalization applied."
+        tests: [not_null]
+      - name: customer_state
+        description: "Two-letter Brazilian state code (e.g. SP, RJ). Profiled for casing inconsistency — none found."
+        tests: [not_null]
+      - name: customer_unique_id
+        description: "Olist's persistent identifier for the real-world customer across multiple orders — customer_id is generated fresh per order, so this is the field to use when deduping a customer across their order history."
+      - name: customer_zip_code_prefix
+        description: "First digits of the customer's Brazilian postal code (full zip not provided in this dataset for privacy)."
+
+  - name: stg_products
+    description: "Confirmed product_id is a true unique key (no duplicates found via profiling). 610 products are missing category/description metadata entirely (product_category_name, product_name_lenght, product_description_lenght, product_photos_qty all null together) — incomplete seller-submitted listings, not a pipeline defect. 2 products separately missing physical dimensions."
+    columns:
+      - name: product_id
+        description: "Primary key. Confirmed unique via profiling."
+        tests: [unique, not_null]
+      - name: product_category_name
+        description: "Original Portuguese category name. Null for 610 products with incomplete seller-submitted listings — joined against stg_product_category_translation in dim_products with a coalesce fallback."
+      - name: product_photos_qty
+        description: "Number of photos in the product listing. Null together with the other 610 incomplete-listing rows (category/description metadata all missing as a group)."
+      - name: product_weight_g
+        description: "Product weight in grams. Null for the 2 products separately missing physical dimensions."
+      - name: product_length_cm
+        description: "Product length in centimeters. Null for the 2 products separately missing physical dimensions."
+      - name: product_height_cm
+        description: "Product height in centimeters. Null for the 2 products separately missing physical dimensions."
+      - name: product_width_cm
+        description: "Product width in centimeters. Null for the 2 products separately missing physical dimensions."
+
+  - name: stg_payments
+    description: "Composite key (order_id, payment_sequential). Composite uniqueness enforced via dbt_utils.unique_combination_of_columns. Profiling confirmed no nulls in any column."
     tests:
-    - unique
-    - not_null
-  - name: customer_id
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - payment_sequential
+    columns:
+      - name: order_id
+        description: "Part of the composite key (order_id, payment_sequential). An order can have multiple payment rows — e.g. a voucher row plus a credit_card row on the same order."
+        tests: [not_null]
+      - name: payment_sequential
+        description: "Second half of the composite key. Sequence number distinguishing multiple payment rows on the same order (does not represent installment number)."
+        tests: [not_null]
+      - name: payment_type
+        description: "Payment method for this specific row: credit_card, boleto, voucher, or debit_card. An order can mix multiple types across its payment rows."
+        tests: [not_null]
+      - name: payment_value
+        description: "Dollar amount for this individual payment row, not the order total. See int_order_payments for the order-level sum(payment_value) aggregation."
+        tests: [not_null]
+      - name: payment_installments
+        description: "Raw installment count for this row. Not directly usable at order grain — voucher rows carry payment_installments = 1 as a structural artifact rather than a real installment count. int_order_payments resolves the real order-level count by summing this field scoped to payment_type = 'credit_card' only."
+
+  - name: stg_reviews
+    description: "Grain is one row per (review_id, order_id) — review_id alone is NOT unique. Confirmed via profiling: Olist attaches the same review_id/creation_date to multiple order_ids when orders are bundled. Composite uniqueness test deferred to Day 8. review_comment_title and review_comment_message are expected to be null on most rows (88% and 59% respectively) — not every customer leaves written feedback."
+    columns:
+      - name: review_id
+        description: "Not unique on its own — see model description. Half of the (review_id, order_id) composite grain."
+        tests: [not_null]
+      - name: order_id
+        description: "Other half of the (review_id, order_id) composite grain. One review_id can attach to multiple order_ids when Olist bundles a customer's orders into a single review request."
+        tests: [not_null]
+      - name: review_score
+        description: "Customer star rating, 1-5 scale."
+        tests: [not_null]
+      - name: review_comment_title
+        description: "Optional freetext review title. Null on ~88% of rows — most customers don't leave a written title."
+      - name: review_comment_message
+        description: "Optional freetext review body. Null on ~59% of rows — not every customer leaves written feedback."
+      - name: review_created_at
+        description: "Timestamp Olist sent the review request to the customer. Renamed from raw_reviews' review_creation_date."
+      - name: review_answered_at
+        description: "Timestamp the customer submitted their review response. Renamed from raw_reviews' review_answer_timestamp."
+
+  - name: stg_sellers
+    description: "Confirmed seller_id is a true unique key. Profiled seller_city/seller_state for casing inconsistency — none found (clean)."
+    columns:
+      - name: seller_id
+        description: "Primary key. Confirmed unique via profiling."
+        tests: [unique, not_null]
+      - name: seller_city
+        description: "Seller's city, self-reported. Profiled for casing/whitespace inconsistency — none found."
+        tests: [not_null]
+      - name: seller_state
+        description: "Two-letter Brazilian state code. Profiled for casing inconsistency — none found."
+        tests: [not_null]
+      - name: seller_zip_code_prefix
+        description: "First digits of the seller's Brazilian postal code (full zip not provided in this dataset)."
+
+  - name: stg_order_items
+    description: "Composite key (order_id, order_item_id). Composite uniqueness enforced via dbt_utils.unique_combination_of_columns. Profiling confirmed no nulls in any column."
     tests:
-    - not_null
-  - name: order_status
-    tests:
-    - not_null
-- name: stg_customers
-  description: "Confirmed customer_id is a true unique key. Profiled customer_city/customer_state for\
-    \ casing inconsistency \u2014 none found (clean)."
-  columns:
-  - name: customer_id
-    tests:
-    - unique
-    - not_null
-  - name: customer_city
-    tests:
-    - not_null
-  - name: customer_state
-    tests:
-    - not_null
-- name: stg_products
-  description: "Confirmed product_id is a true unique key (no duplicates found via profiling). 610 products\
-    \ are missing category/description metadata entirely (product_category_name, product_name_lenght,\
-    \ product_description_lenght, product_photos_qty all null together) \u2014 incomplete seller-submitted\
-    \ listings, not a pipeline defect. 2 products separately missing physical dimensions."
-  columns:
-  - name: product_id
-    tests:
-    - unique
-    - not_null
-- name: stg_payments
-  description: Composite key (order_id, payment_sequential). Composite uniqueness enforced via dbt_utils.unique_combination_of_columns.
-    Profiling confirmed no nulls in any column.
-  tests:
-  - dbt_utils.unique_combination_of_columns:
-      arguments:
-        combination_of_columns:
-        - order_id
-        - payment_sequential
-  columns:
-  - name: order_id
-    tests:
-    - not_null
-  - name: payment_sequential
-    tests:
-    - not_null
-  - name: payment_type
-    tests:
-    - not_null
-  - name: payment_value
-    tests:
-    - not_null
-- name: stg_reviews
-  description: "Grain is one row per (review_id, order_id) \u2014 review_id alone is NOT unique. Confirmed\
-    \ via profiling: Olist attaches the same review_id/creation_date to multiple order_ids when orders\
-    \ are bundled. Composite uniqueness test deferred to Day 8. review_comment_title and review_comment_message\
-    \ are expected to be null on most rows (88% and 59% respectively) \u2014 not every customer leaves\
-    \ written feedback."
-  columns:
-  - name: review_id
-    tests:
-    - not_null
-  - name: order_id
-    tests:
-    - not_null
-  - name: review_score
-    tests:
-    - not_null
-- name: stg_sellers
-  description: "Confirmed seller_id is a true unique key. Profiled seller_city/seller_state for casing\
-    \ inconsistency \u2014 none found (clean)."
-  columns:
-  - name: seller_id
-    tests:
-    - unique
-    - not_null
-  - name: seller_city
-    tests:
-    - not_null
-  - name: seller_state
-    tests:
-    - not_null
-- name: stg_order_items
-  description: Composite key (order_id, order_item_id). Composite uniqueness enforced via dbt_utils.unique_combination_of_columns.
-    Profiling confirmed no nulls in any column.
-  tests:
-  - dbt_utils.unique_combination_of_columns:
-      arguments:
-        combination_of_columns:
-        - order_id
-        - order_item_id
-  columns:
-  - name: order_id
-    tests:
-    - not_null
-  - name: order_item_id
-    tests:
-    - not_null
-  - name: product_id
-    tests:
-    - not_null
-  - name: seller_id
-    tests:
-    - not_null
-  - name: price
-    tests:
-    - not_null
-- name: stg_product_category_translation
-  description: Small lookup table (71 rows). Confirmed product_category_name is a true unique key via
-    profiling.
-  columns:
-  - name: product_category_name
-    tests:
-    - unique
-    - not_null
-  - name: product_category_name_english
-    tests:
-    - not_null
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns:
+              - order_id
+              - order_item_id
+    columns:
+      - name: order_id
+        description: "Part of the composite key (order_id, order_item_id). An order can contain multiple line items across different sellers/products."
+        tests: [not_null]
+      - name: order_item_id
+        description: "Sequence number of the line item within its order. Combined with order_id, forms the true unique grain of this table."
+        tests: [not_null]
+      - name: product_id
+        description: "FK to dim_products for this line item."
+        tests: [not_null]
+      - name: seller_id
+        description: "FK to dim_sellers for this line item. An order's line items can span multiple sellers, which is why fct_orders does not carry seller_id directly."
+        tests: [not_null]
+      - name: price
+        description: "Item price for this line item, in the seed currency. Rounded to 2 decimal places downstream (int_order_items) to avoid float accumulation error."
+        tests: [not_null]
+      - name: shipping_limit_at
+        description: "Seller's deadline to hand the item off to the logistics carrier."
+      - name: freight_value
+        description: "Shipping cost for this line item. Rounded to 2 decimal places downstream (int_order_items) to avoid float accumulation error, same as price."
+
+  - name: stg_product_category_translation
+    description: "Small lookup table (71 rows). Confirmed product_category_name is a true unique key via profiling."
+    columns:
+      - name: product_category_name
+        description: "Primary key. Original Portuguese category name as it appears in raw_products. Confirmed unique via profiling."
+        tests: [unique, not_null]
+      - name: product_category_name_english
+        description: "English translation of product_category_name. Joined into dim_products with a coalesce fallback to the Portuguese name when no translation exists."
+        tests: [not_null]
