@@ -13,7 +13,7 @@ A dbt-core + DuckDB analytics engineering project transforming the [Olist Brazil
 - **Tests:** 53+ tests (schema + singular), including composite-key uniqueness via `dbt_utils`
 - **Stack:** dbt-core, dbt-duckdb, DuckDB, Python (pandas, validation scripts)
 
-## Architecture / DAG
+## Architecture / Project DAG
 
 <!-- TODO Day 13: embed the full-project DAG screenshot from Day 9 here -->
 
