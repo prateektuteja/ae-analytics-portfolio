@@ -1,4 +1,5 @@
 # AE Analytics Portfolio — Olist E-Commerce dbt Project
+![dbt CI](https://github.com/prateektuteja/ae-analytics-portfolio/actions/workflows/dbt-ci.yml/badge.svg)
 
 A dbt-core + DuckDB analytics engineering project transforming the [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce) into a tested, documented star schema.
 
